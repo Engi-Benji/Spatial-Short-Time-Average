@@ -3,12 +3,44 @@ from sklearn.cluster import HDBSCAN
 import matplotlib.patches as patches
 import numpy as np
 from matplotlib import pyplot as plt
+from matplotlib import colormaps as cm
+from numpy.typing import NDArray
+from copy import deepcopy
+from collections import defaultdict
 
 from TDMS_Read import TdmsReader
 from TDMS_Utilities import get_data
 from filters import filter_waterfall
 from SSTA import ssta
-from copy import deepcopy
+
+
+
+class UnionFind:
+    def __init__(self, n):
+        self.parent = list(range(n))
+        self.rank = [0] * n
+
+    def find(self, x):
+        if self.parent[x] != x:
+            self.parent[x] = self.find(self.parent[x])  # path compression
+        return self.parent[x]
+
+    def union(self, a, b):
+        root_a = self.find(a)
+        root_b = self.find(b)
+
+        if root_a == root_b:
+            return
+
+        if self.rank[root_a] < self.rank[root_b]:
+            self.parent[root_a] = root_b
+
+        elif self.rank[root_a] > self.rank[root_b]:
+            self.parent[root_b] = root_a
+
+        else:
+            self.parent[root_b] = root_a
+            self.rank[root_a] += 1
 
 
 def plot_clusters(data, cluster_info=None, x=None, min_width=-1, max_width=-1, num_points=-1, save=None):
@@ -33,7 +65,7 @@ def plot_clusters(data, cluster_info=None, x=None, min_width=-1, max_width=-1, n
     img1 = ax.imshow(data, aspect='auto', interpolation='none', vmin=-bounds, vmax=bounds)
     # ax.set_xlim(1200, 1500)
     plt.ylabel('Time (seconds)')
-    img1.set_cmap(plt.cm.get_cmap('bwr'))
+    img1.set_cmap(cm.get_cmap('bwr'))
 
     if cluster_info is not None:
         rects = []
@@ -114,76 +146,215 @@ def extract_clusters(x):
 
     return cluster_info
 
-def cluster_association(cluster_data, sample_overlap, channel_overlap, fs, min_width, max_width, min_length, max_length):
+def cluster_association(
+    cluster_data,
+    sample_overlap,
+    channel_overlap,
+    fs,
+    min_width,
+    max_width,
+    min_length,
+    max_length
+):
 
-    #massive clusters need filtering or they may skew the association
-    copy = []
-    for c in cluster_data:
-        if min_width <= c[3] - c[2] < max_width and min_length < c[1] - c[0] < max_length:
-            copy.append(c)
+    # -------------------------------------------------
+    # Filter out oversized clusters
+    # -------------------------------------------------
 
-    stable = False
+    cluster_data = np.asarray(cluster_data, dtype=object)
 
-    #averaging distance for a signal
+    widths = cluster_data[:, 3] - cluster_data[:, 2]
+    lengths = cluster_data[:, 1] - cluster_data[:, 0]
+
+    keep_mask = (
+        (widths >= min_width) &
+        (widths < max_width) &
+        (lengths > min_length) &
+        (lengths < max_length)
+    )
+
+    clusters = cluster_data[keep_mask]
+
+    n = len(clusters)
+
+    if n == 0:
+        return []
+
+    # -------------------------------------------------
+    # Overlap tolerances
+    # -------------------------------------------------
+
     xOff = channel_overlap / 2
-
-    #fixed time diff
     yOff = (sample_overlap * fs) / 2
 
-    while not stable:
-        stable = True
+    uf = UnionFind(n)
 
-        for i, a in enumerate(copy):
-            if i == len(copy):
-                print("end")
-            else:
-                for j, b in enumerate(copy):
-                    if i != j:
-                        x_overlap = False
-                        y_overlap = False
-                        c = [0, 0, 0, 0]
+    # -------------------------------------------------
+    # Find all overlapping clusters
+    # -------------------------------------------------
 
-                        #find the midpoint
-                        b_mp = b[2] + int((b[3] - b[2])/2)
+    for i in range(n):
 
-                        #midpoint extended overlap
-                        if ((b_mp - xOff if b_mp - xOff < b[2] else b[2]) <= a[2] <= (b_mp + xOff if b_mp + xOff > b[3] else b[3]) <= a[3] or
-                                a[2] <= (b_mp - xOff if b_mp - xOff < b[2] else b[2]) <= a[3] <= (b_mp + xOff if b_mp + xOff > b[3] else b[3]) or
-                                (b_mp - xOff if b_mp - xOff < b[2] else b[2]) <= a[2] <= a[3] <= (b_mp + xOff if b_mp + xOff > b[3] else b[3]) or
-                                a[2] <= (b_mp - xOff if b_mp - xOff < b[2] else b[2]) <= (b_mp + xOff if b_mp + xOff > b[3] else b[3]) <= a[3]):
-                            c[2] = min([a[2], b[2]])
-                            c[3] = max([a[3], b[3]])
-                            x_overlap = True
+        a = clusters[i]
 
-                        #adaptive time difference
-                        #yOff = b[1] - b[0]
+        for j in range(i + 1, n):
 
-                        #boundry extended overlap
-                        if b[0] - yOff <= a[0] <= b[1] + yOff <= a[1] or a[0] <= b[0] - yOff <= a[1] <= b[1] + yOff or b[0] - yOff <= a[0] <= a[1] <= b[1] + yOff or a[0] <= b[0] - yOff <= b[1] + yOff <= a[1]:
-                            c[0] = min([a[0], b[0]])
-                            c[1] = max([a[1], b[1]])
-                            y_overlap = True
+            b = clusters[j]
 
-                        if x_overlap and y_overlap:
-                            stable = False
+            # -------------------------------------
+            # Channel overlap
+            # -------------------------------------
 
-                            copy[i][0] = copy[i][0] if c[0] == 0 else c[0]
-                            copy[i][1] = copy[i][1] if c[1] == 0 else c[1]
-                            copy[i][2] = copy[i][2] if c[2] == 0 else c[2]
-                            copy[i][3] = copy[i][3] if c[3] == 0 else c[3]
-                            copy[i][4] = copy[i][4] + copy[j][4]
+            b_mp = b[2] + (b[3] - b[2]) / 2
 
-                            #print(b)
-                            #print(copy[i+j+1])
-                            try:
-                                del copy[j]
-                            except IndexError:
-                                print("Index Error")
-                            break
+            bx_min = min(b[2], b_mp - xOff)
+            bx_max = max(b[3], b_mp + xOff)
 
-            if not stable:
-                break
-    return copy
+            x_overlap = not (
+                a[3] < bx_min or
+                bx_max < a[2]
+            )
+
+            if not x_overlap:
+                continue
+
+            # -------------------------------------
+            # Time overlap
+            # -------------------------------------
+
+            y_overlap = not (
+                a[1] < (b[0] - yOff) or
+                (b[1] + yOff) < a[0]
+            )
+
+            if not y_overlap:
+                continue
+
+            uf.union(i, j)
+
+    # -------------------------------------------------
+    # Group connected clusters
+    # -------------------------------------------------
+
+    groups = defaultdict(list)
+
+    for idx in range(n):
+        groups[uf.find(idx)].append(idx)
+
+    # -------------------------------------------------
+    # Build merged clusters
+    # -------------------------------------------------
+
+    merged_clusters = []
+
+    for member_indices in groups.values():
+
+        group = clusters[member_indices]
+
+        min_sample = min(c[0] for c in group)
+        max_sample = max(c[1] for c in group)
+
+        min_channel = min(c[2] for c in group)
+        max_channel = max(c[3] for c in group)
+
+        total_points = sum(c[4] for c in group)
+
+        merged_clusters.append([
+            min_sample,
+            max_sample,
+            min_channel,
+            max_channel,
+            total_points
+        ])
+
+    return merged_clusters
+
+# def cluster_association(cluster_data, sample_overlap: int, channel_overlap: int, fs: int, min_width: int, max_width: int, min_length:int, max_length:int):
+#     """Groups clusters within a specific range of each other
+
+#     Keyword arguments:
+#         cluster_data -- 
+#         sample_overlap -- 
+#         channel_overlap -- 
+#         fs -- 
+#         min_width -- 
+#         max_width -- 
+#         min_length --
+#         max_length
+#     """
+
+#     #massive clusters need filtering or they may skew the association
+#     cluster_data = np.asarray(cluster_data)
+
+#     widths = cluster_data[:,3] - cluster_data[:,2]
+#     lengths = cluster_data[:,1] - cluster_data[:,0]
+
+#     mask = (
+#         (widths >= min_width) &
+#         (widths < max_width) &
+#         (lengths > min_length) &
+#         (lengths < max_length)
+# )
+
+#     cluster_data = cluster_data[mask].tolist()
+
+#     stable = False
+
+#     #averaging distance for a signal
+#     xOff = channel_overlap / 2
+
+#     #fixed time diff
+#     yOff = (sample_overlap * fs) / 2
+
+#     while not stable:
+#         stable = True
+
+#         for i, a in enumerate(cluster_data):
+#             for j in range(i + 1, len(cluster_data)):
+#                 b = cluster_data[j]
+#                 if i != j:
+#                     x_overlap = False
+#                     y_overlap = False
+
+#                     #find the midpoint
+#                     b_mp = b[2] + int((b[3] - b[2])/2)
+
+#                     #midpoint extended overlap
+
+#                     x_overlap = not (
+#                         a[3] < min(b[2], b_mp - xOff) or 
+#                         max(b[3], b_mp + xOff) < a[2]
+#                     )
+
+#                     #adaptive time difference
+#                     #yOff = b[1] - b[0]
+
+#                     #boundry extended overlap
+#                     y_overlap = not (
+#                         a[1] < (b[0] - yOff) or
+#                         (b[1] + yOff) < a[0]
+#                     )
+
+#                     if x_overlap and y_overlap:
+#                         stable = False
+
+#                         cluster_data[i][0] = min(a[0], b[0])
+#                         cluster_data[i][1] = max(a[1], b[1])
+
+#                         cluster_data[i][2] = min(a[2], b[2])
+#                         cluster_data[i][3] = max(a[3], b[3])
+
+#                         #print(b)
+#                         #print(copy[i+j+1])
+#                         try:
+#                             del cluster_data[j]
+#                         except IndexError:
+#                             print("Index Error")
+#                         break
+
+#             if not stable:
+#                 break
+#     return cluster_data
 
 def labelled_cluster_association(cluster_data, label_data, sample_overlap, channel_overlap, fs, min_width, max_width, min_length, max_length):
 

@@ -7,7 +7,7 @@ from filters import filter_waterfall
 from TDMS_Read import TdmsReader
 
 
-def get_data(tdms, first_chan=-1, last_chan=-1, first_sample=-1, last_sample=-1):
+def get_data(tdms, first_chan=-1, last_chan=-1, first_sample=-1, last_sample=-1, native_spacing = -1, spacing=-1):
     """Takes a TDMSReader object and returns scaled data from the TDMS file associated
 
     Keyword arguments:
@@ -17,6 +17,8 @@ def get_data(tdms, first_chan=-1, last_chan=-1, first_sample=-1, last_sample=-1)
     #THIS HAS TO RUN OR FILE INFO NEVER POPULATES
     props = tdms.get_properties()
     n_channels = tdms.fileinfo['n_channels']
+    if native_spacing == -1:
+        native_spacing = props.get('SpatialResolution[m]') * props.get('Fibre Length Multiplier')
 
     if first_chan == -1:
         first_channel = 0
@@ -41,6 +43,15 @@ def get_data(tdms, first_chan=-1, last_chan=-1, first_sample=-1, last_sample=-1)
 
     some_data = tdms.get_data(first_channel, last_channel, first_time_sample, last_time_sample)
     #print('Size of data loaded: {0}'.format(some_data.shape))
+
+    if spacing != -1:
+        if native_spacing != spacing:
+            if spacing < native_spacing:
+                print(f"Unable to go lower than recorded spacing: spacing set to native value {native_spacing}")
+            else:
+                sampling_interval = int(spacing / native_spacing)
+                some_data = some_data[:, ::sampling_interval]
+                # print(sampling_interval)
 
     some_data = scale(some_data, props)
 

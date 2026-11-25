@@ -18,58 +18,124 @@ from clustering import plot_clusters
 
 def processing_pipeline(data, fs, highcut, lowcut, threshold, num):
 
-    # Data Filtering  - Best Time:
+    pipeline_start = perf_counter()
 
-    filtered_data = filter_waterfall(data, fs, lowcut=lowcut, highcut=highcut)
+    # -------------------------
+    # Filtering
+    # -------------------------
+    t0 = perf_counter()
 
-    # SSTA  - Best Time:
-    mask = ssta(data, thresh=threshold, num=num)
+    filtered_data = filter_waterfall(
+        data,
+        fs,
+        lowcut=lowcut,
+        highcut=highcut
+    )
+
+    print(f"Filtering: {perf_counter() - t0:.3f} s")
+
+    # -------------------------
+    # SSTA
+    # -------------------------
+    t0 = perf_counter()
+
+    mask = ssta(
+        filtered_data,
+        thresh=threshold,
+        num=num
+    )
+
     SSTA_Points = np.where(mask == 1)
 
-    # Clustering, Association  - Best Time:
+    print(f"SSTA: {perf_counter() - t0:.3f} s")
+
+    # -------------------------
+    # HDBSCAN Setup
+    # -------------------------
+    t0 = perf_counter()
 
     point_data = list(zip(SSTA_Points[1], SSTA_Points[0]))
-    x = SSTA_Points
-
     point_data = np.array(point_data)
 
-    hdb = HDBSCAN(min_cluster_size= 4, min_samples=None)
+    print(f"Point Preparation: {perf_counter() - t0:.3f} s")
+    print(f"Detection Points: {len(point_data)}")
+
+    # -------------------------
+    # HDBSCAN
+    # -------------------------
+    t0 = perf_counter()
+
+    hdb = HDBSCAN(
+        min_cluster_size=4,
+        min_samples=None,
+        copy=False,
+        n_jobs=-1
+    )
+
     clusters = hdb.fit_predict(point_data)
 
-    #extract cluster window information from the point dataset
+    print(f"HDBSCAN: {perf_counter() - t0:.3f} s")
+
+    # -------------------------
+    # Cluster Extraction
+    # -------------------------
+    t0 = perf_counter()
+
     cluster_vals = []
-    for i in range(0, (max(clusters) + 1)):
+
+    for i in range(0, max(clusters) + 1):
         cluster_vals.append([])
-    tx = np.transpose(x)
+
+    tx = np.transpose(SSTA_Points)
 
     for point, l in zip(tx, hdb.labels_):
         cluster_vals[l].append(point)
 
     cluster_info = []
+
     for c in cluster_vals:
+
         c = np.transpose(c)
+
         info = []
-        #time
-        #print(np.size(c))
+
         info.append(np.min(c[0]))
         info.append(np.max(c[0]))
 
-        #channel
         info.append(np.min(c[1]))
         info.append(np.max(c[1]))
 
-        #number of points
         info.append(np.shape(c)[1])
-        info.append(c)
 
         cluster_info.append(info)
 
-    # association 
+    print(f"Cluster Extraction: {perf_counter() - t0:.3f} s")
 
-    events = cluster_association(deepcopy(cluster_info), 0.25, 40, 1000, -1, 100, -1, 1000)
-    print(len(events))
+    # -------------------------
+    # Association
+    # -------------------------
+    t0 = perf_counter()
 
+    events = cluster_association(
+        deepcopy(cluster_info),
+        0.25,
+        40,
+        1000,
+        -1,
+        100,
+        -1,
+        1000
+    )
 
+    print(f"Association: {perf_counter() - t0:.3f} s")
+
+    print(f"Events Found: {len(events)}")
+
+    # -------------------------
+    # Total
+    # -------------------------
+    print(f"TOTAL PIPELINE: {perf_counter() - pipeline_start:.3f} s")
+    print("-" * 50)
 
 
 def pipeline_loader(folder_location,
@@ -95,23 +161,28 @@ def pipeline_loader(folder_location,
     file_length = None
     data = None
     for i, file in enumerate(file_array):
-        
+        tdms = TdmsReader(f'{folder_location}{file}')
         if i == 0 and processing_duration == duration:
                 # get_data(tdms, first_chan=-1, last_chan=-1, first_sample=-1, last_sample=-1, spacing=-1)
-                data = get_data(TdmsReader(f'{folder_location}{file}'), start_channel, end_channel, native_spacing = native_channel_spacing, spacing = channel_spacing)
+
+                t0 = perf_counter()
+                data = get_data(tdms, start_channel, end_channel, native_spacing = native_channel_spacing, spacing = channel_spacing)
+                print(f"TDMS Read: {perf_counter() - t0:.3f} s")
                 
                 processing_pipeline(data, fs, highcut, lowcut, threshold, num)
 
         elif i == 0 and processing_duration != duration:
 
-            data = get_data(TdmsReader(f'{folder_location}{file}'), start_channel, end_channel, 0, (processing_duration * fs) - 1, native_spacing = native_channel_spacing, spacing = channel_spacing)
+            t0 = perf_counter()
+            data = get_data(tdms, start_channel, end_channel, 0, (processing_duration * fs) - 1, native_spacing = native_channel_spacing, spacing = channel_spacing)
+            print(f"TDMS Read: {perf_counter() - t0:.3f} s")
             file_read_length = int(np.shape(np.array(data))[0]/fs)
 
             processing_pipeline(data)
 
             while file_read_length != duration:
                 
-                new_data = get_data(TdmsReader(f'{folder_location}{file}'), 
+                new_data = get_data(tdms, 
                                 start_channel, 
                                 end_channel, 
                                 file_read_length * fs, 
@@ -120,7 +191,9 @@ def pipeline_loader(folder_location,
                                 spacing = channel_spacing
                                 )
 
+                t0 = perf_counter()
                 data = np.append(data[((interval * fs) + 1)::], new_data, axis=0)
+                print(f"Window Update: {perf_counter() - t0:.3f} s")
 
                 file_read_length += interval
 
@@ -130,7 +203,7 @@ def pipeline_loader(folder_location,
             file_read_length = 0
             while file_read_length != duration:
                 
-                new_data = get_data(TdmsReader(f'{folder_location}{file}'), 
+                new_data = get_data(tdms, 
                                 start_channel, 
                                 end_channel, 
                                 file_read_length * fs, 
@@ -139,7 +212,9 @@ def pipeline_loader(folder_location,
                                 spacing = channel_spacing
                                 )
 
+                t0 = perf_counter()
                 data = np.append(data[((interval * fs) + 1)::], new_data, axis=0)
+                print(f"Window Update: {perf_counter() - t0:.3f} s")
 
                 file_read_length += interval
 

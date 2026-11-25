@@ -2,6 +2,7 @@ import gc
 from tqdm import tqdm
 import numpy as np
 from matplotlib import pyplot as plt
+from numpy.typing import NDArray
 
 from filters import filter_waterfall
 from TDMS_Read import TdmsReader
@@ -47,7 +48,14 @@ def plot_mask(data, x, save=None):
         plt.show(block=False)
 
 
-def ssta(data, start_channel=1650, end_channel=8500, num=50, thresh=2, get_mask=True):
+def ssta(
+    data: NDArray[np.floating],
+    start_channel: int = 0,
+    end_channel: int = -1,
+    num: int = 50,
+    thresh: int = 2,
+    get_mask: bool = True,
+) -> NDArray[np.floating | np.int64]:
     """Performs the spatial short term average on an array of DAS data
 
     Keyword arguments:
@@ -62,36 +70,44 @@ def ssta(data, start_channel=1650, end_channel=8500, num=50, thresh=2, get_mask=
     """
 
     n_channels = data.shape[1]
-    mask = []
-    with tqdm(total=len(data)) as pbar:
-        for i in range(0, len(data)):
-            if not (i - num <= 0):
-                temp = np.array(data[i - num:i, start_channel:end_channel])
-                temp = abs(temp)
-                mean = temp.mean()
 
-                channel_mask = []
-                for channel in range(len(temp[0])):
-                    cdata = np.array(temp.transpose()[channel, :])
-                    cdata = abs(cdata)
-                    if cdata.mean() / mean > thresh:
+    if end_channel == -1:
+        end_channel = n_channels
 
-                        if get_mask:
-                            # 1 or 0 mask
-                            channel_mask.append(1)
-                        else:
-                            # gives actual amplitude of the data
-                            channel_mask.append(abs(data[i, channel]))
-                    else:
-                        channel_mask.append(0)
+    mask: list[NDArray[np.int64] | NDArray[np.floating]] = []
+    # with tqdm(total=len(data)) as pbar:
+    for i in range(0, len(data)):
+        if not (i - num <= 0):
+            temp = np.abs(data[i - num : i, start_channel:end_channel])
+            mean = temp.mean()
 
-                mask.append(channel_mask)
-            pbar.update()
+            channel_means = np.ascontiguousarray(temp.T).mean(axis=1)
+            hits = channel_means / mean > thresh
 
-    mask = np.array(mask)
-    mask = np.pad(mask, [(num, 0), (start_channel, (n_channels - end_channel))], mode='constant', constant_values=-1)
+            if get_mask:
+                mask.append(hits.astype(np.int64))
+            else:
+                amplitudes = np.abs(data[i, : hits.size])
 
-    return mask
+                if not hits.any():
+                    mask.append(np.zeros(hits.size, np.int64))
+                elif hits.all():
+                    mask.append(amplitudes)
+                else:
+                    mask.append(
+                        np.where(hits, amplitudes, 0).astype(
+                            np.result_type(data.dtype, np.int64)
+                        )
+                    )
+
+            # pbar.update()
+
+    return np.pad(
+        np.array(mask),
+        [(num, 0), (start_channel, (n_channels - end_channel))],
+        mode="constant",
+        constant_values=-1,
+    )
 
 if __name__ == '__main__':
     file_path = "Example Windows/November_Window_UTC_20231109_134947.573.tdms"

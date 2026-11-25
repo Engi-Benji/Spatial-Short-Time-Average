@@ -178,7 +178,7 @@ def pipeline_loader(folder_location,
             print(f"TDMS Read: {perf_counter() - t0:.3f} s")
             file_read_length = int(np.shape(np.array(data))[0]/fs)
 
-            processing_pipeline(data)
+            processing_pipeline(data, fs, highcut, lowcut, threshold, num)
 
             while file_read_length != duration:
                 

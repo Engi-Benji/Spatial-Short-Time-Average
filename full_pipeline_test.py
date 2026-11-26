@@ -5,6 +5,7 @@ from matplotlib import patches
 from matplotlib import colormaps as cm
 from copy import deepcopy
 from sklearn.cluster import HDBSCAN
+import fast_hdbscan
 from time import perf_counter
 
 
@@ -65,11 +66,11 @@ def processing_pipeline(data, fs, highcut, lowcut, threshold, num):
     # -------------------------
     t0 = perf_counter()
 
-    hdb = HDBSCAN(
+    hdb = fast_hdbscan.HDBSCAN(
         min_cluster_size=4,
-        min_samples=None,
-        copy=False,
-        n_jobs=-1
+        min_samples=None
+        # copy=False,
+        # n_jobs=-1
     )
 
     clusters = hdb.fit_predict(point_data)

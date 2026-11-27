@@ -15,9 +15,16 @@ from filters import filter_waterfall
 from SSTA import ssta
 from clustering import cluster_association
 
-from clustering import plot_clusters
-
-def processing_pipeline(data, fs, highcut, lowcut, threshold, num):
+def processing_pipeline(
+    data,
+    fs,
+    highcut,
+    lowcut,
+    threshold,
+    num,
+    window_start_sample,
+    active_events
+):
 
     pipeline_start = perf_counter()
 
@@ -42,7 +49,7 @@ def processing_pipeline(data, fs, highcut, lowcut, threshold, num):
     t0 = perf_counter()
 
     mask = ssta(
-        abs(filtered_data),
+        filtered_data,
         thresh=threshold,
         num=num
     )
@@ -56,8 +63,12 @@ def processing_pipeline(data, fs, highcut, lowcut, threshold, num):
     # -------------------------
     t0 = perf_counter()
 
-    point_data = list(zip(SSTA_Points[1], SSTA_Points[0]))
-    point_data = np.array(point_data)
+    point_data = np.column_stack(
+        (
+            SSTA_Points[1],
+            SSTA_Points[0]
+        )
+    )
 
     print(f"Point Preparation: {perf_counter() - t0:.3f} s")
     print(f"Detection Points: {len(point_data)}")
@@ -121,13 +132,71 @@ def processing_pipeline(data, fs, highcut, lowcut, threshold, num):
     events = cluster_association(
         deepcopy(cluster_info),
         0.25,
-        40,
+        10,
         1000,
         -1,
         100,
         -1,
         1000
     )
+
+    for event in events:
+        event[0] += window_start_sample
+        event[1] += window_start_sample
+
+    for event in events:
+
+        merged = False
+
+        for i, active in enumerate(active_events):
+
+            time_overlap = (
+                event[0] <= active[1] + 250
+                and
+                event[1] >= active[0] - 250
+            )
+
+            channel_overlap = (
+                event[2] <= active[3] + 10
+                and
+                event[3] >= active[2] - 10
+            )
+
+            if time_overlap and channel_overlap:
+
+                active_events[i] = [
+
+                    min(active[0], event[0]),
+                    max(active[1], event[1]),
+
+                    min(active[2], event[2]),
+                    max(active[3], event[3]),
+
+                    active[4] + event[4]
+
+                ]
+
+                merged = True
+                break
+
+        if not merged:
+
+            active_events.append(event)
+
+    completed_events = []
+    remaining_events = []
+
+    for event in active_events:
+        if event[1] < (window_start_sample - 250):
+
+            completed_events.append(event)
+
+        else:
+
+            remaining_events.append(event)
+
+    active_events = remaining_events
+
 
     print(f"Association: {perf_counter() - t0:.3f} s")
 
@@ -136,6 +205,8 @@ def processing_pipeline(data, fs, highcut, lowcut, threshold, num):
     # -------------------------
 
     print(f"Events Found: {len(events)}")
+    print(f"Active: {len(active_events)}")
+    print(f"Complete: {len(completed_events)}")
 
     # -------------------------
     # Total
@@ -143,7 +214,7 @@ def processing_pipeline(data, fs, highcut, lowcut, threshold, num):
     print(f"TOTAL PIPELINE: {perf_counter() - pipeline_start:.3f} s")
     print("-" * 50)
 
-    return events
+    return active_events
 
 
 def pipeline_loader(folder_location,
@@ -165,7 +236,10 @@ def pipeline_loader(folder_location,
 
     # 50% overlap between the sampled durations
     interval = int(processing_duration * 0.5)
+    interval_samples = interval * fs
+    window_start_sample = 0
 
+    active_events = []
     file_length = None
     data = None
     for i, file in enumerate(file_array):
@@ -177,7 +251,18 @@ def pipeline_loader(folder_location,
                 data = get_data(tdms, start_channel, end_channel, native_spacing = native_channel_spacing, spacing = channel_spacing)
                 print(f"TDMS Read: {perf_counter() - t0:.3f} s")
                 
-                processing_pipeline(data, fs, highcut, lowcut, threshold, num)
+                active_events = (
+                    processing_pipeline(
+                        data,
+                        fs,
+                        highcut,
+                        lowcut,
+                        threshold,
+                        num,
+                        window_start_sample,
+                        active_events
+                    )
+                )
 
         elif i == 0 and processing_duration != duration:
 
@@ -186,7 +271,18 @@ def pipeline_loader(folder_location,
             print(f"TDMS Read: {perf_counter() - t0:.3f} s")
             file_read_length = int(np.shape(np.array(data))[0]/fs)
 
-            processing_pipeline(data, fs, highcut, lowcut, threshold, num)
+            active_events = (
+                processing_pipeline(
+                    data,
+                    fs,
+                    highcut,
+                    lowcut,
+                    threshold,
+                    num,
+                    window_start_sample,
+                    active_events
+                )
+            )
 
             while file_read_length != duration:
                 
@@ -204,8 +300,22 @@ def pipeline_loader(folder_location,
                 print(f"Window Update: {perf_counter() - t0:.3f} s")
 
                 file_read_length += interval
+                window_start_sample += (
+                    interval * fs
+                )
 
-                processing_pipeline(data, fs, highcut, lowcut, threshold, num)
+                active_events = (
+                    processing_pipeline(
+                        data,
+                        fs,
+                        highcut,
+                        lowcut,
+                        threshold,
+                        num,
+                        window_start_sample,
+                        active_events
+                    )
+                )
 
         else:
             file_read_length = 0
@@ -225,8 +335,22 @@ def pipeline_loader(folder_location,
                 print(f"Window Update: {perf_counter() - t0:.3f} s")
 
                 file_read_length += interval
+                window_start_sample += (
+                    interval * fs
+                )
 
-                processing_pipeline(data, fs, highcut, lowcut, threshold, num)
+                active_events = (
+                    processing_pipeline(
+                        data,
+                        fs,
+                        highcut,
+                        lowcut,
+                        threshold,
+                        num,
+                        window_start_sample,
+                        active_events
+                    )
+                )
 
 
 if __name__ == "__main__":

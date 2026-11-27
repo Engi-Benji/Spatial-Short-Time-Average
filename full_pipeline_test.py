@@ -26,6 +26,7 @@ def processing_pipeline(data, fs, highcut, lowcut, threshold, num):
     # -------------------------
     t0 = perf_counter()
 
+    data = data.astype(np.float32, copy=False)
     filtered_data = filter_waterfall(
         data,
         fs,
@@ -41,12 +42,12 @@ def processing_pipeline(data, fs, highcut, lowcut, threshold, num):
     t0 = perf_counter()
 
     mask = ssta(
-        filtered_data,
+        abs(filtered_data),
         thresh=threshold,
         num=num
     )
 
-    SSTA_Points = np.where(mask == 1)
+    SSTA_Points = np.nonzero(mask)
 
     print(f"SSTA: {perf_counter() - t0:.3f} s")
 
@@ -130,6 +131,10 @@ def processing_pipeline(data, fs, highcut, lowcut, threshold, num):
 
     print(f"Association: {perf_counter() - t0:.3f} s")
 
+    # -------------------------
+        # Classification
+    # -------------------------
+
     print(f"Events Found: {len(events)}")
 
     # -------------------------
@@ -137,6 +142,8 @@ def processing_pipeline(data, fs, highcut, lowcut, threshold, num):
     # -------------------------
     print(f"TOTAL PIPELINE: {perf_counter() - pipeline_start:.3f} s")
     print("-" * 50)
+
+    return events
 
 
 def pipeline_loader(folder_location,

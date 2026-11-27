@@ -2,3 +2,5 @@
 *.tdms
 /points
 *.pth
+/__pycache__
+/.vscode

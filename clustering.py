@@ -7,6 +7,7 @@ from matplotlib import colormaps as cm
 from numpy.typing import NDArray
 from copy import deepcopy
 from collections import defaultdict
+from numba import njit
 
 from TDMS_Read import TdmsReader
 from TDMS_Utilities import get_data
@@ -15,32 +16,32 @@ from SSTA import ssta
 
 
 
-class UnionFind:
-    def __init__(self, n):
-        self.parent = list(range(n))
-        self.rank = [0] * n
+# class UnionFind:
+#     def __init__(self, n):
+#         self.parent = list(range(n))
+#         self.rank = [0] * n
 
-    def find(self, x):
-        if self.parent[x] != x:
-            self.parent[x] = self.find(self.parent[x])  # path compression
-        return self.parent[x]
+#     def find(self, x):
+#         if self.parent[x] != x:
+#             self.parent[x] = self.find(self.parent[x])  # path compression
+#         return self.parent[x]
 
-    def union(self, a, b):
-        root_a = self.find(a)
-        root_b = self.find(b)
+#     def union(self, a, b):
+#         root_a = self.find(a)
+#         root_b = self.find(b)
 
-        if root_a == root_b:
-            return
+#         if root_a == root_b:
+#             return
 
-        if self.rank[root_a] < self.rank[root_b]:
-            self.parent[root_a] = root_b
+#         if self.rank[root_a] < self.rank[root_b]:
+#             self.parent[root_a] = root_b
 
-        elif self.rank[root_a] > self.rank[root_b]:
-            self.parent[root_b] = root_a
+#         elif self.rank[root_a] > self.rank[root_b]:
+#             self.parent[root_b] = root_a
 
-        else:
-            self.parent[root_b] = root_a
-            self.rank[root_a] += 1
+#         else:
+#             self.parent[root_b] = root_a
+#             self.rank[root_a] += 1
 
 
 def plot_clusters(data, cluster_info=None, x=None, min_width=-1, max_width=-1, num_points=-1, save=None):
@@ -146,6 +147,94 @@ def extract_clusters(x):
 
     return cluster_info
 
+
+@njit(inline="always")
+def find(parent, x):
+    while parent[x] != x:
+        parent[x] = parent[parent[x]]
+        x = parent[x]
+    return x
+
+
+@njit(inline="always")
+def union(parent, rank, a, b):
+
+    pa = find(parent, a)
+    pb = find(parent, b)
+
+    if pa == pb:
+        return
+
+    if rank[pa] < rank[pb]:
+        parent[pa] = pb
+
+    elif rank[pb] < rank[pa]:
+        parent[pb] = pa
+
+    else:
+        parent[pb] = pa
+        rank[pa] += 1
+
+
+@njit(cache=True)
+def overlap_union_find(
+    clusters,
+    xOff,
+    yOff
+):
+    n = len(clusters)
+
+    parent = np.arange(n, dtype=np.int32)
+    rank = np.zeros(n, dtype=np.int8)
+
+    for i in range(n):
+
+        a0 = clusters[i, 0]
+        a1 = clusters[i, 1]
+        a2 = clusters[i, 2]
+        a3 = clusters[i, 3]
+
+        for j in range(i + 1, n):
+
+            b0 = clusters[j, 0]
+
+            #
+            # IMPORTANT:
+            # since sorted by start sample,
+            # once this fails we can stop
+            #
+            if b0 > a1 + yOff:
+                break
+
+            b1 = clusters[j, 1]
+            b2 = clusters[j, 2]
+            b3 = clusters[j, 3]
+
+            #
+            # channel overlap
+            #
+            b_mp = 0.5 * (b2 + b3)
+
+            bx_min = min(b2, b_mp - xOff)
+            bx_max = max(b3, b_mp + xOff)
+
+            if a3 < bx_min or bx_max < a2:
+                continue
+
+            #
+            # time overlap
+            #
+            if a1 < (b0 - yOff):
+                continue
+
+            if (b1 + yOff) < a0:
+                continue
+
+            union(parent, rank, i, j)
+
+    return parent
+
+
 def cluster_association(
     cluster_data,
     sample_overlap,
@@ -154,120 +243,79 @@ def cluster_association(
     min_width,
     max_width,
     min_length,
-    max_length
+    max_length,
 ):
 
-    # -------------------------------------------------
-    # Filter out oversized clusters
-    # -------------------------------------------------
-
-    cluster_data = np.asarray(cluster_data, dtype=object)
-
-    widths = cluster_data[:, 3] - cluster_data[:, 2]
-    lengths = cluster_data[:, 1] - cluster_data[:, 0]
-
-    keep_mask = (
-        (widths >= min_width) &
-        (widths < max_width) &
-        (lengths > min_length) &
-        (lengths < max_length)
+    clusters = np.asarray(
+        cluster_data,
+        dtype=np.float32
     )
 
-    clusters = cluster_data[keep_mask]
-
-    n = len(clusters)
-
-    if n == 0:
+    if len(clusters) == 0:
         return []
 
-    # -------------------------------------------------
-    # Overlap tolerances
-    # -------------------------------------------------
+    #
+    # width/length filtering
+    #
+    widths = clusters[:, 3] - clusters[:, 2]
+    lengths = clusters[:, 1] - clusters[:, 0]
 
-    xOff = channel_overlap / 2
-    yOff = (sample_overlap * fs) / 2
+    keep = (
+        (widths >= min_width)
+        & (widths < max_width)
+        & (lengths > min_length)
+        & (lengths < max_length)
+    )
 
-    uf = UnionFind(n)
+    clusters = clusters[keep]
 
-    # -------------------------------------------------
-    # Find all overlapping clusters
-    # -------------------------------------------------
+    if len(clusters) == 0:
+        return []
 
-    for i in range(n):
+    #
+    # sort by start sample
+    #
+    order = np.argsort(clusters[:, 0])
 
-        a = clusters[i]
+    clusters = clusters[order]
 
-        for j in range(i + 1, n):
+    xOff = channel_overlap * 0.5
+    yOff = sample_overlap * fs * 0.5
 
-            b = clusters[j]
+    parent = overlap_union_find(
+        clusters,
+        xOff,
+        yOff
+    )
 
-            # -------------------------------------
-            # Channel overlap
-            # -------------------------------------
+    #
+    # path compression
+    #
+    for i in range(len(parent)):
+        parent[i] = find(parent, i)
 
-            b_mp = b[2] + (b[3] - b[2]) / 2
+    #
+    # merge clusters
+    #
+    roots = np.unique(parent)
 
-            bx_min = min(b[2], b_mp - xOff)
-            bx_max = max(b[3], b_mp + xOff)
+    merged = []
 
-            x_overlap = not (
-                a[3] < bx_min or
-                bx_max < a[2]
-            )
+    for root in roots:
 
-            if not x_overlap:
-                continue
+        idx = np.where(parent == root)[0]
 
-            # -------------------------------------
-            # Time overlap
-            # -------------------------------------
+        group = clusters[idx]
 
-            y_overlap = not (
-                a[1] < (b[0] - yOff) or
-                (b[1] + yOff) < a[0]
-            )
-
-            if not y_overlap:
-                continue
-
-            uf.union(i, j)
-
-    # -------------------------------------------------
-    # Group connected clusters
-    # -------------------------------------------------
-
-    groups = defaultdict(list)
-
-    for idx in range(n):
-        groups[uf.find(idx)].append(idx)
-
-    # -------------------------------------------------
-    # Build merged clusters
-    # -------------------------------------------------
-
-    merged_clusters = []
-
-    for member_indices in groups.values():
-
-        group = clusters[member_indices]
-
-        min_sample = min(c[0] for c in group)
-        max_sample = max(c[1] for c in group)
-
-        min_channel = min(c[2] for c in group)
-        max_channel = max(c[3] for c in group)
-
-        total_points = sum(c[4] for c in group)
-
-        merged_clusters.append([
-            min_sample,
-            max_sample,
-            min_channel,
-            max_channel,
-            total_points
+        merged.append([
+            float(np.min(group[:, 0])),
+            float(np.max(group[:, 1])),
+            float(np.min(group[:, 2])),
+            float(np.max(group[:, 3])),
+            float(np.sum(group[:, 4])),
         ])
 
-    return merged_clusters
+    return merged
 
 # def cluster_association(cluster_data, sample_overlap: int, channel_overlap: int, fs: int, min_width: int, max_width: int, min_length:int, max_length:int):
 #     """Groups clusters within a specific range of each other

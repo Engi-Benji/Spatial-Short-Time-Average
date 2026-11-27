@@ -81,7 +81,17 @@ if __name__ == "__main__":
     plt.clf()
     plt.plot(t, x, label='Noisy signal')
 
-    y = butter_bandpass_filter(x, lowcut=lowcut, highcut=highcut, fs=fs, order=6)
+    sos = butter_bandpass(
+            lowcut,
+            highcut,
+            fs,
+            order
+        )
+    
+    y = sosfilt(
+        sos,
+        x)
+    
     plt.plot(t, y, label='Filtered signal (%g Hz)' % f0)
     plt.xlabel('time (seconds)')
     plt.hlines([-a, a], 0, T, linestyles='--')
